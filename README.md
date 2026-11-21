@@ -23,7 +23,8 @@ For every IPsec site-to-site network on every site:
 - **Leaves paused tunnels alone.** Someone paused them.
 - **Follows up on what it changed.** If a changed tunnel isn't up after `KICK_AFTER`, it pauses it for `PAUSE_FOR` and
   resumes it, once. (UniFi sometimes doesn't rebuild a tunnel after an address change until it is toggled.) If it is
-  still down `FAIL_AFTER` later, it reports that and stops trying.
+  still down `FAIL_AFTER` later, it reports that and stops trying. While either end's gateway is offline it only waits
+  (one notice), since the tunnel can't come up; `KICK_AFTER` starts again once both gateways are online.
 - **Reports** every change, recovery and failure, and when the controller stays unreachable.
 
 It never touches tunnels it didn't change, and it never touches anything else.

@@ -34,8 +34,12 @@ type watch struct {
 	peerSite  string
 	peerNet   string
 	changedAt time.Time
-	kickedAt  time.Time
-	failed    bool
+	// waitFrom is when the KickAfter clock started: the change, or the
+	// moment the peer gateway came back online after being seen offline.
+	waitFrom time.Time
+	peerDown bool // the peer gateway was offline at the last follow-up
+	kickedAt time.Time
+	failed   bool
 }
 
 type Reconciler struct {
@@ -152,7 +156,7 @@ func (r *Reconciler) cycle(ctx context.Context) error {
 		r.mu.Lock()
 		r.watches[t.NetworkID] = &watch{
 			label: t.SiteDesc + " / " + t.Name, site: t.SiteID,
-			peerNet: t.PeerNetworkID, changedAt: r.Now(),
+			peerNet: t.PeerNetworkID, changedAt: r.Now(), waitFrom: r.Now(),
 		}
 		if p := findSiteByDesc(sites, t.PeerSite); p != nil {
 			r.watches[t.NetworkID].peerSite = p.ID
@@ -238,6 +242,26 @@ func (r *Reconciler) followUp(ctx context.Context, sites map[string]*Site) error
 			s = pst[w.peerNet]
 		}
 		now := r.Now()
+		// A tunnel can't come up while either end's gateway is offline, and a
+		// pause/resume would only reprovision a gateway for nothing (or queue
+		// one for an offline gateway). Wait until both are online, then give
+		// it the full KickAfter from that moment.
+		if offline := offlineEnd(sites, w.site, w.peerSite); s != Up && offline != "" {
+			if !w.peerDown {
+				w.peerDown = true
+				r.Log.Info("tunnel down, a gateway is offline; waiting for it", "tunnel", w.label, "offline", offline)
+				r.notify(ctx, "UniFi S2S: "+w.label+" is waiting for "+offline,
+					fmt.Sprintf("Its addresses were updated %s ago. The tunnel is down because the gateway at %s is offline; it will not be paused/resumed until that gateway is back.",
+						now.Sub(w.changedAt).Round(time.Second), offline))
+			}
+			continue
+		}
+		if w.peerDown {
+			w.peerDown = false
+			if w.kickedAt.IsZero() {
+				w.waitFrom = now
+			}
+		}
 		switch {
 		case s == Up:
 			r.Log.Info("tunnel is up after the change", "tunnel", w.label)
@@ -249,7 +273,7 @@ func (r *Reconciler) followUp(ctx context.Context, sites map[string]*Site) error
 			r.mu.Lock()
 			delete(r.watches, id)
 			r.mu.Unlock()
-		case w.kickedAt.IsZero() && now.Sub(w.changedAt) >= r.Opts.KickAfter:
+		case w.kickedAt.IsZero() && now.Sub(w.waitFrom) >= r.Opts.KickAfter:
 			r.Log.Info("tunnel still down; pausing and resuming it", "tunnel", w.label, "status", s)
 			w.kickedAt = now
 			if err := r.kick(ctx, w.site, id); err != nil {
@@ -265,6 +289,17 @@ func (r *Reconciler) followUp(ctx context.Context, sites map[string]*Site) error
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// offlineEnd names the first of these sites whose gateway is missing or
+// offline, or returns "" when every known one is online.
+func offlineEnd(sites map[string]*Site, ids ...string) string {
+	for _, id := range ids {
+		if s := sites[id]; s != nil && (s.Gateway == nil || !s.Gateway.Online) {
+			return s.Desc
+		}
+	}
+	return ""
 }
 
 // kick pauses a tunnel, waits, and resumes it. The resume is retried, because

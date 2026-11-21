@@ -186,6 +186,51 @@ func TestKickOnceThenReport(t *testing.T) {
 	}
 }
 
+func TestNoKickWhilePeerOffline(t *testing.T) {
+	h := newHarness(true)
+	h.api.sites[1].Gateway.Online = false
+	h.api.sites[0].Gateway.WANs["wan"] = "198.51.100.88" // A moved while B is offline
+	h.cycle(t)
+	// B's stored config is fixed too (applied when it reconnects); only A's
+	// address counts, and A is online.
+	want := "a/a-to-b ipsec_local_ip=198.51.100.88|b/b-to-a ipsec_peer_ip=198.51.100.88"
+	if strings.Join(h.api.updates, "|") != want {
+		t.Fatalf("updates %v", h.api.updates)
+	}
+	h.api.status["a-to-b"] = Down
+	h.api.status["b-to-a"] = Down
+	for i := 0; i < 3; i++ {
+		h.now = h.now.Add(4 * time.Minute)
+		h.cycle(t)
+	}
+	if len(h.api.updates) != 2 {
+		t.Fatalf("paused/resumed while B offline: %v", h.api.updates[2:])
+	}
+	if c := strings.Count(strings.Join(*h.notes, "|"), "is waiting for Site B"); c != 2 {
+		t.Fatalf("want one waiting notice per end, notes %v", *h.notes)
+	}
+	if strings.Contains(strings.Join(*h.notes, "|"), "still down") {
+		t.Fatalf("reported failure while B offline: %v", *h.notes)
+	}
+
+	// B returns: a full KickAfter from now before any pause/resume.
+	h.api.sites[1].Gateway.Online = true
+	h.cycle(t)
+	h.now = h.now.Add(2 * time.Minute)
+	h.cycle(t)
+	if len(h.api.updates) != 2 {
+		t.Fatalf("kicked before KickAfter since B returned: %v", h.api.updates[2:])
+	}
+	h.now = h.now.Add(2 * time.Minute)
+	h.cycle(t)
+	kicks := strings.Join(h.api.updates[2:], "|")
+	for _, id := range []string{"a/a-to-b", "b/b-to-a"} {
+		if !strings.Contains(kicks, id+" enabled=false") || !strings.Contains(kicks, id+" enabled=true") {
+			t.Fatalf("%s not kicked after B returned: %v", id, h.api.updates)
+		}
+	}
+}
+
 func TestStatusFromPeerEnd(t *testing.T) {
 	h := newHarness(true)
 	h.moveB()
